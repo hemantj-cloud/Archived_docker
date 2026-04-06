@@ -1,0 +1,96 @@
+version: 0.2
+
+env:
+  variables:
+    DOCKER_BUILDKIT: "1"
+    CACHE_TAG: "buildcache"
+    TARGET_PLATFORM: "linux/arm64"
+    TEMPLATE_DIR: "build-templates/docker"
+
+phases:
+  pre_build:
+    commands:
+      - set -eu
+      - test -n "${ECR_REPOSITORY_URI:-}"
+      - test -n "${CODE_BUCKET:-}"
+      - test -n "${S3_KEY:-}"
+      - test -n "${IMAGE_TAG:-}"
+      - ECR_REGISTRY="$(echo "$ECR_REPOSITORY_URI" | cut -d/ -f1)"
+      - ECR_REGION="$(echo "$ECR_REGISTRY" | cut -d. -f4)"
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region "$ECR_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      - echo "Checking for remote cache image..."
+      - |
+          if docker pull "$ECR_REPOSITORY_URI:$CACHE_TAG"; then
+            echo "--cache-from $ECR_REPOSITORY_URI:$CACHE_TAG" > /tmp/cache-args.txt
+            echo "Remote cache found."
+          else
+            : > /tmp/cache-args.txt
+            echo "No remote cache found. First build will proceed without cache."
+          fi
+      - echo "Downloading code package from S3..."
+      - aws s3 cp "s3://$CODE_BUCKET/$S3_KEY" /tmp/code-package.zip
+      - rm -rf /tmp/build
+      - mkdir -p /tmp/build
+      - unzip -q /tmp/code-package.zip -d /tmp/build
+      - |
+          APP_PACKAGE_JSON="$(find /tmp/build -maxdepth 5 -type f -name package.json -not -path '*/node_modules/*' | head -n 1)"
+          if [ -z "$APP_PACKAGE_JSON" ]; then
+            echo "ERROR: package.json not found after unzip"
+            find /tmp/build -maxdepth 5 -type f -name package.json
+            exit 1
+          fi
+          APP_DIR="$(dirname "$APP_PACKAGE_JSON")"
+          echo "$APP_DIR" > /tmp/app-dir.txt
+          echo "Building from $APP_DIR"
+
+  build:
+    commands:
+      - set -eu
+      - APP_DIR="$(cat /tmp/app-dir.txt)"
+      - CACHE_FROM_ARGS="$(cat /tmp/cache-args.txt)"
+      - cp -R "$CODEBUILD_SRC_DIR/$TEMPLATE_DIR" /tmp/template-dir
+      - cp "$CODEBUILD_SRC_DIR/scripts/select-dockerfile-template.sh" /tmp/select-dockerfile-template.sh
+      - chmod +x /tmp/select-dockerfile-template.sh
+      - cd "$APP_DIR"
+      - /tmp/select-dockerfile-template.sh /tmp/template-dir
+      - echo "Building Docker image..."
+      - |
+          if [ -n "$CACHE_FROM_ARGS" ]; then
+            docker build \
+              --platform "$TARGET_PLATFORM" \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              $CACHE_FROM_ARGS \
+              -t "$ECR_REPOSITORY_URI:$IMAGE_TAG" \
+              -t "$ECR_REPOSITORY_URI:latest" \
+              -t "$ECR_REPOSITORY_URI:$CACHE_TAG" \
+              .
+          else
+            docker build \
+              --platform "$TARGET_PLATFORM" \
+              --build-arg BUILDKIT_INLINE_CACHE=1 \
+              -t "$ECR_REPOSITORY_URI:$IMAGE_TAG" \
+              -t "$ECR_REPOSITORY_URI:latest" \
+              -t "$ECR_REPOSITORY_URI:$CACHE_TAG" \
+              .
+          fi
+
+  post_build:
+    commands:
+      - set -eu
+      - |
+          if [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ]; then
+            echo "Pushing Docker image..."
+            docker push "$ECR_REPOSITORY_URI:$IMAGE_TAG"
+            docker push "$ECR_REPOSITORY_URI:latest"
+            docker push "$ECR_REPOSITORY_URI:$CACHE_TAG"
+            echo "IMAGE_URI=$ECR_REPOSITORY_URI:$IMAGE_TAG" > /tmp/build-output.txt
+            echo "Build completed successfully"
+          else
+            echo "Build phase failed earlier. Skipping push."
+            exit 1
+          fi
+
+artifacts:
+  files:
+    - /tmp/build-output.txt

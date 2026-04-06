@@ -1,0 +1,45 @@
+FROM public.ecr.aws/docker/library/node:20-alpine AS builder
+
+WORKDIR /app
+
+ENV NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_PROGRESS=false
+
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+COPY . .
+
+RUN if [ -f "src/widgets/package.json" ]; then \
+      cd src/widgets && \
+      if [ -f package-lock.json ]; then npm ci; else npm install; fi && \
+      cd /app; \
+    fi
+
+RUN npm run build
+
+RUN npm prune --omit=dev && \
+    if [ -f "src/widgets/package.json" ]; then \
+      cd src/widgets && npm prune --omit=dev && cd /app; \
+    fi
+
+FROM public.ecr.aws/docker/library/node:20-alpine AS production
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_PROGRESS=false
+
+RUN apk add --no-cache procps
+RUN npm install -g @nitrostack/cli --no-audit --no-fund --progress=false
+
+COPY --from=builder --chown=node:node /app /app
+
+USER node
+
+EXPOSE 3000
+
+CMD ["nitrostack-cli", "start"]
