@@ -3,6 +3,20 @@
 *   **The Fix**: Use **Docker Buildx** with **Registry Caching** for instant layer hits.
 *   **The Goal**: **Leverage Existing Base Images** (`runtime-base` & `builder-base`) to shave 30+ seconds off every build.
 
+### 🔄 Build Steps Progression
+| **Old Flow (10 Steps)** | **New Optimized Flow (6 Steps)** |
+| :--- | :--- |
+| 1. Validate inputs | 1. Validate inputs |
+| 2. Login to ECR | 2. Login to ECR |
+| 3. **Manual pull** cache image | 3. **(Automated)** Download & Extract Source |
+| 4. Download source from S3 | 4. Select Dockerfile Template |
+| 5. Extract & Locate App | 5. **(Atomic)** Build & Push with Cache |
+| 6. Copy Docker Templates | 6. Output Image URI |
+| 7. Select Dockerfile Script | |
+| 8. Build Image | |
+| 9. Push to ECR | |
+| 10. Output Image URI | |
+
 ---
 # NitroStack Build Optimization Plan
 
